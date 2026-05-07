@@ -77,14 +77,14 @@ export default [
       'eslint-plugin-n/no-unsupported-features/es-builtins': [
         'error',
         {
-          version: '>=18.0.0',
+          version: '>=21.0.0',
           ignores: [],
         },
       ],
       'eslint-plugin-n/no-unsupported-features/node-builtins': [
         'error',
         {
-          version: '>=18.0.0',
+          version: '>=21.0.0',
           ignores: [],
         },
       ],
