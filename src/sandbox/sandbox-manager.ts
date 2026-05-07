@@ -650,6 +650,12 @@ async function wrapWithSandbox(
       expandedAllowRead.push(stripped)
     }
   }
+  // The TLS-termination CA cert must be readable by the child so the trust
+  // env vars (NODE_EXTRA_CA_CERTS etc.) resolve, even if its path falls
+  // under a user-configured denyRead.
+  if (mitmCA) {
+    expandedAllowRead.push(mitmCA.certPath)
+  }
   const readConfig = {
     denyOnly: expandedDenyRead,
     allowWithinDeny: expandedAllowRead,
@@ -691,6 +697,7 @@ async function wrapWithSandbox(
         // Only pass proxy ports if proxy is running (when there are domains to filter)
         httpProxyPort: needsNetworkProxy ? getProxyPort() : undefined,
         socksProxyPort: needsNetworkProxy ? getSocksProxyPort() : undefined,
+        caCertPath: mitmCA?.certPath,
         readConfig,
         writeConfig,
         allowUnixSockets: getAllowUnixSockets(),
@@ -721,6 +728,7 @@ async function wrapWithSandbox(
         socksProxyPort: needsNetworkProxy
           ? managerContext?.socksProxyPort
           : undefined,
+        caCertPath: mitmCA?.certPath,
         readConfig,
         writeConfig,
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
