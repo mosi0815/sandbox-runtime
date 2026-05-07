@@ -9,18 +9,19 @@
     "srt": "dist/cli.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "bun": ">=1.3.13"
   },
   "scripts": {
     "build": "tsc",
     "build:seccomp": "bun vendor/seccomp/build.ts",
+    "build:executables": "bun run build:seccomp && bun scripts/build-executables.ts",
     "clean": "rm -rf dist",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' --fix --cache --cache-location=node_modules/.cache/.eslintcache",
     "lint:check": "eslint 'src/**/*.ts' --cache --cache-location=node_modules/.cache/.eslintcache",
     "format": "prettier --write 'src/**/*.ts' --cache --log-level warn",
-    "prepublishOnly": "npm run clean && npm run build && cp -r vendor dist/",
+    "prepublishOnly": "bun run clean && bun run build && bun run build:executables && cp -r vendor dist/",
     "prepare": "husky"
   },
   "dependencies": {

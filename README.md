@@ -11,7 +11,7 @@ A lightweight sandboxing tool for enforcing filesystem and network restrictions 
 ## Installation
 
 ```bash
-npm install -g @anthropic-ai/sandbox-runtime
+bun add --global @anthropic-ai/sandbox-runtime
 ```
 
 ## Basic Usage
@@ -168,6 +168,9 @@ srt --debug curl https://example.com
 
 # Specify custom settings file
 srt --settings /path/to/srt-settings.json npm install
+
+# Pass the complete config inline
+srt --config-json-base64 eyJuZXR3b3JrIjp7Li4ufX0= npm install
 ```
 
 ### As a library
@@ -266,6 +269,15 @@ srt --settings /path/to/srt-settings.json <command>
     "allowWrite": [".", "src/", "test/", "/tmp"],
     "denyWrite": [".env", "config/production.json"]
   },
+  "linux": {
+    "bindMounts": [
+      {
+        "source": "/home/user/project",
+        "target": "/sessions/session-1/mnt/workspace",
+        "mode": "rw"
+      }
+    ]
+  },
   "ignoreViolations": {
     "*": ["/usr/bin", "/System"],
     "git push": ["/usr/bin/nc"],
@@ -341,6 +353,35 @@ Examples:
 
 - Paths can be absolute (e.g., `/home/user/.ssh`) or relative to the current working directory (e.g., `./src`)
 - `~` expands to the user's home directory
+
+#### Linux Bind Mounts
+
+`linux.bindMounts` adds explicit bubblewrap bind mounts after the standard filesystem policy is generated. This is useful when a caller needs a synthetic Linux folder layout while keeping the host source path elsewhere.
+
+- `source` - Host path to expose.
+- `target` - Absolute path inside the sandbox.
+- `mode` - `"rw"` or `"ro"`; defaults to `"rw"`.
+
+Example:
+
+```json
+{
+  "linux": {
+    "bindMounts": [
+      {
+        "source": "/home/user/project",
+        "target": "/sessions/session-1/mnt/workspace",
+        "mode": "rw"
+      },
+      {
+        "source": "/home/user/uploads",
+        "target": "/mnt/.virtiofs-root/shared/home/user/uploads",
+        "mode": "ro"
+      }
+    ]
+  }
+}
+```
 
 #### Other Configuration
 
@@ -467,27 +508,31 @@ The package includes pre-generated seccomp BPF filters for x86-64 and arm archit
 
 ```bash
 # Install dependencies
-npm install
+bun install
 
 # Build the project
-npm run build
+bun run build
 
 # Run tests
-npm test
+bun test
 
 # Type checking
-npm run typecheck
+bun run typecheck
 
 # Lint code
-npm run lint
+bun run lint
 
 # Format code
-npm run format
+bun run format
 ```
 
-### Building Seccomp Binaries
+### Fetching Seccomp Binaries
 
-The BPF filter and `apply-seccomp` loader are compiled from C source in `vendor/seccomp-src/` via `npm run build:seccomp` (Linux only; needs `gcc` and `libseccomp-dev`). CI runs it before tests on each Linux arch, and the release workflow builds both arches and bundles them into the published package.
+`bun run build:seccomp` downloads `@anthropic-ai/sandbox-runtime` from the npm registry at the version listed in `package.json` and extracts the prebuilt `apply-seccomp` loaders to `vendor/seccomp/x64/apply-seccomp` and `vendor/seccomp/arm64/apply-seccomp`. Bump `version` in `package.json` to pull from a newer upstream release. Requires `tar` and network access; no compiler toolchain is needed.
+
+### Building Standalone Executables
+
+`bun run build:executables` builds `dist/srt-linux-amd64` and `dist/srt-linux-arm64` with Bun's single-file executable bundler. The compiled executables embed both `apply-seccomp` loaders as assets. At runtime, `srt` writes the matching embedded loader to a private temp file and passes that executable path to the existing Linux sandbox code.
 
 ## Implementation Details
 

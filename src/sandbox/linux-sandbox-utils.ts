@@ -21,7 +21,7 @@ import type {
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
 import { getApplySeccompBinaryPath } from './generate-seccomp-filter.js'
-import type { SeccompConfig } from './sandbox-config.js'
+import type { LinuxBindMount, SeccompConfig } from './sandbox-config.js'
 
 export interface LinuxNetworkBridgeContext {
   httpSocketPath: string
@@ -55,6 +55,8 @@ export interface LinuxSandboxParams {
   bwrapPath?: string
   /** Absolute path to the socat binary (default: resolve "socat" via PATH) */
   socatPath?: string
+  /** Additional bwrap bind mounts, emitted after standard filesystem policy */
+  bindMounts?: LinuxBindMount[]
   /** Abort signal to cancel the ripgrep scan */
   abortSignal?: AbortSignal
 }
@@ -130,6 +132,184 @@ function hasFileAncestor(targetPath: string): boolean {
   }
 
   return false
+}
+
+function pathAncestors(dest: string): string[] {
+  const normalized = path.posix.normalize(dest)
+  const parts = normalized.split('/').filter(Boolean)
+  const ancestors: string[] = []
+  let current = ''
+  for (let i = 0; i < parts.length - 1; i++) {
+    current += '/' + parts[i]
+    ancestors.push(current)
+  }
+  return ancestors
+}
+
+function syntheticMountRoot(target: string): string | undefined {
+  if (target === '/sessions' || target.startsWith('/sessions/')) {
+    return '/sessions'
+  }
+  if (
+    target === '/mnt/.virtiofs-root' ||
+    target.startsWith('/mnt/.virtiofs-root/')
+  ) {
+    return '/mnt'
+  }
+  return undefined
+}
+
+function getCustomBindMountRootExcludes(
+  bindMounts: LinuxBindMount[] = [],
+): Set<string> {
+  const excludes = new Set<string>()
+  for (const mount of bindMounts) {
+    const root = syntheticMountRoot(path.posix.normalize(mount.target))
+    if (root) {
+      excludes.add(root)
+    }
+  }
+  return excludes
+}
+
+function generateCustomBindMountArgs(
+  bindMounts: LinuxBindMount[] = [],
+): string[] {
+  const args: string[] = []
+  const tmpfsRoots = new Set<string>()
+  const createdDirs = new Set<string>()
+  const mountedTargets = new Set<string>()
+
+  for (const mount of bindMounts) {
+    const source = normalizePathForSandbox(mount.source)
+    const target = path.posix.normalize(mount.target)
+    const mode = mount.mode ?? 'rw'
+
+    if (!target.startsWith('/')) {
+      throw new Error(
+        `Linux bind mount target must be absolute: ${mount.target}`,
+      )
+    }
+    let sourceStat: fs.Stats
+    try {
+      sourceStat = fs.statSync(source)
+    } catch {
+      logForDebugging(
+        `[Sandbox Linux] Skipping bind mount with missing source: ${source} -> ${target}`,
+      )
+      continue
+    }
+
+    const tmpfsRoot = syntheticMountRoot(target)
+    if (tmpfsRoot && !tmpfsRoots.has(tmpfsRoot)) {
+      args.push('--tmpfs', tmpfsRoot)
+      tmpfsRoots.add(tmpfsRoot)
+      createdDirs.add(tmpfsRoot)
+    }
+
+    for (const ancestor of pathAncestors(target)) {
+      if (!createdDirs.has(ancestor)) {
+        args.push('--dir', ancestor)
+        createdDirs.add(ancestor)
+      }
+    }
+    if (sourceStat.isDirectory() && !createdDirs.has(target)) {
+      args.push('--dir', target)
+      createdDirs.add(target)
+    }
+
+    if (mountedTargets.has(target)) {
+      logForDebugging(
+        `[Sandbox Linux] Skipping duplicate bind mount target: ${target}`,
+      )
+      continue
+    }
+    mountedTargets.add(target)
+
+    args.push(mode === 'ro' ? '--ro-bind' : '--bind', source, target)
+    logForDebugging(
+      `[Sandbox Linux] Added custom bind mount: ${source} -> ${target} (${mode})`,
+    )
+  }
+
+  return args
+}
+
+function pathIsSameOrChild(parent: string, child: string): boolean {
+  return child === parent || child.startsWith(parent + '/')
+}
+
+function readDenyTmpfsAncestor(
+  target: string,
+  readConfig: FsReadRestrictionConfig | undefined,
+): string | undefined {
+  const rootSkip = new Set(['/proc', '/dev', '/sys'])
+  const candidates: string[] = []
+  for (const rawDeny of readConfig?.denyOnly || []) {
+    const deny = normalizePathForSandbox(rawDeny)
+    if (deny === '/') {
+      const firstComponent = '/' + target.split('/').filter(Boolean)[0]
+      if (!rootSkip.has(firstComponent)) {
+        candidates.push(firstComponent)
+      }
+      continue
+    }
+    if (!pathIsSameOrChild(deny, target)) continue
+    try {
+      if (fs.statSync(deny).isDirectory()) {
+        candidates.push(deny)
+      }
+    } catch {
+      // generateFilesystemArgs skips non-existent deny paths as well.
+    }
+  }
+
+  return candidates.sort((a, b) => b.length - a.length)[0]
+}
+
+function generateApplySeccompBindArgs(
+  applyPath: string,
+  readConfig: FsReadRestrictionConfig | undefined,
+): string[] {
+  const source = normalizePathForSandbox(applyPath)
+  const target = path.posix.normalize(source)
+  const args: string[] = []
+  const hiddenAncestor = readDenyTmpfsAncestor(target, readConfig)
+
+  if (hiddenAncestor) {
+    for (const ancestor of pathAncestors(target)) {
+      if (
+        ancestor !== hiddenAncestor &&
+        pathIsSameOrChild(hiddenAncestor, ancestor)
+      ) {
+        args.push('--dir', ancestor)
+      }
+    }
+  }
+
+  args.push('--ro-bind', source, target)
+  logForDebugging(
+    `[Sandbox Linux] Bound apply-seccomp into sandbox: ${source} -> ${target}`,
+  )
+  return args
+}
+
+function generateReadonlyRootArgs(rootTmpfsExcludes: Set<string>): string[] {
+  if (rootTmpfsExcludes.size === 0) {
+    return ['--ro-bind', '/', '/']
+  }
+
+  const args = ['--tmpfs', '/']
+  const skipped = new Set(['/dev', '/proc', '/sys', ...rootTmpfsExcludes])
+  const children = fs.readdirSync('/').sort()
+  for (const child of children) {
+    const abs = '/' + child
+    if (skipped.has(abs)) {
+      continue
+    }
+    args.push('--ro-bind', abs, abs)
+  }
+  return args
 }
 
 /**
@@ -625,25 +805,35 @@ export async function initializeLinuxNetworkBridge(
  * Resolve how to invoke apply-seccomp: either a standalone binary path, or a
  * multicall-binary prefix that dispatches on the ARGV0 env var.
  *
- * Returns a shell-ready string ending in a trailing space — callers append
+ * Returns a shell-ready prefix ending in a trailing space — callers append
  * shellquote.quote([shell, '-c', cmd]). Returns undefined when seccomp is
- * unavailable (no argv0, no binary found).
+ * unavailable (no argv0, no binary found). Standalone binary mode also returns
+ * the host path so bwrap can bind it back if read restrictions hide it.
  *
  * When argv0 is set, applyPath is used verbatim (no existence check); the
  * caller is responsible for ensuring it resolves inside the bwrap namespace.
  */
-function resolveApplySeccompPrefix(
+interface ApplySeccompInvocation {
+  prefix: string
+  bindPath?: string
+}
+
+function resolveApplySeccompInvocation(
   applyPath: string | undefined,
   argv0: string | undefined,
-): string | undefined {
+): ApplySeccompInvocation | undefined {
   if (argv0) {
     if (!applyPath) {
       throw new Error('seccompConfig.argv0 requires seccompConfig.applyPath')
     }
-    return `ARGV0=${shellquote.quote([argv0])} ${shellquote.quote([applyPath])} `
+    return {
+      prefix: `ARGV0=${shellquote.quote([argv0])} ${shellquote.quote([applyPath])} `,
+    }
   }
   const binary = getApplySeccompBinaryPath(applyPath)
-  return binary ? `${shellquote.quote([binary])} ` : undefined
+  return binary
+    ? { prefix: `${shellquote.quote([binary])} `, bindPath: binary }
+    : undefined
 }
 
 /**
@@ -694,6 +884,7 @@ async function generateFilesystemArgs(
   mandatoryDenySearchDepth: number = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH,
   allowGitConfig = false,
   abortSignal?: AbortSignal,
+  rootTmpfsExcludes: Set<string> = new Set(),
 ): Promise<string[]> {
   const args: string[] = []
   // fs already imported
@@ -708,7 +899,7 @@ async function generateFilesystemArgs(
   // Determine initial root mount based on write restrictions
   if (writeConfig) {
     // Write restrictions: Start with read-only root, then allow writes to specific paths
-    args.push('--ro-bind', '/', '/')
+    args.push(...generateReadonlyRootArgs(rootTmpfsExcludes))
 
     // Allow writes to specific paths
     for (const pathPattern of writeConfig.allowOnly || []) {
@@ -1082,6 +1273,7 @@ export async function wrapCommandWithSandboxLinux(
     seccompConfig,
     bwrapPath,
     socatPath,
+    bindMounts,
     abortSignal,
   } = params
 
@@ -1109,6 +1301,7 @@ export async function wrapCommandWithSandboxLinux(
   activeSandboxCount++
 
   const bwrapArgs: string[] = ['--new-session', '--die-with-parent']
+  let applySeccompInvocation: ApplySeccompInvocation | undefined
   let applySeccompPrefix: string | undefined
 
   try {
@@ -1116,10 +1309,11 @@ export async function wrapCommandWithSandboxLinux(
     // apply-seccomp wraps the workload and applies the baked-in BPF filter
     // that blocks socket(AF_UNIX, ...). Skipped when allowAllUnixSockets is true.
     if (!allowAllUnixSockets) {
-      applySeccompPrefix = resolveApplySeccompPrefix(
+      applySeccompInvocation = resolveApplySeccompInvocation(
         seccompConfig?.applyPath,
         seccompConfig?.argv0,
       )
+      applySeccompPrefix = applySeccompInvocation?.prefix
 
       if (!applySeccompPrefix) {
         logForDebugging(
@@ -1203,15 +1397,26 @@ export async function wrapCommandWithSandboxLinux(
     }
 
     // ========== FILESYSTEM RESTRICTIONS ==========
-    const fsArgs = await generateFilesystemArgs(
-      readConfig,
-      writeConfig,
-      ripgrepConfig,
-      mandatoryDenySearchDepth,
-      allowGitConfig,
-      abortSignal,
+    bwrapArgs.push(
+      ...(await generateFilesystemArgs(
+        readConfig,
+        writeConfig,
+        ripgrepConfig,
+        mandatoryDenySearchDepth,
+        allowGitConfig,
+        abortSignal,
+        getCustomBindMountRootExcludes(bindMounts),
+      )),
     )
-    bwrapArgs.push(...fsArgs)
+    if (applySeccompInvocation?.bindPath) {
+      bwrapArgs.push(
+        ...generateApplySeccompBindArgs(
+          applySeccompInvocation.bindPath,
+          readConfig,
+        ),
+      )
+    }
+    bwrapArgs.push(...generateCustomBindMountArgs(bindMounts))
 
     // Always bind /dev
     bwrapArgs.push('--dev', '/dev')

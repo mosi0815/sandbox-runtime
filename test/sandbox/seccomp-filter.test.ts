@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { whichSync } from '../../src/utils/which.js'
 import { getApplySeccompBinaryPath } from '../../src/sandbox/generate-seccomp-filter.js'
 import {
@@ -81,6 +83,32 @@ describe.if(isLinux)('Sandbox Integration', () => {
     })
 
     expect(wrappedCommand).toContain(real)
+  })
+
+  it('binds apply-seccomp back after read-denying its parent directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'srt-apply-seccomp-test-'))
+    const applyPath = join(dir, 'apply-seccomp')
+    writeFileSync(applyPath, '#!/bin/sh\n', { mode: 0o700 })
+
+    try {
+      const wrappedCommand = await wrapCommandWithSandboxLinux({
+        command: 'echo test',
+        needsNetworkRestriction: false,
+        readConfig: { denyOnly: [dir] },
+        writeConfig: { allowOnly: [], denyWithinAllow: [] },
+        seccompConfig: { applyPath },
+      })
+
+      const tmpfsAt = wrappedCommand.indexOf(`--tmpfs ${dir}`)
+      const bindAt = wrappedCommand.indexOf(
+        `--ro-bind ${applyPath} ${applyPath}`,
+      )
+
+      expect(tmpfsAt).toBeGreaterThan(-1)
+      expect(bindAt).toBeGreaterThan(tmpfsAt)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('argv0 mode: builds ARGV0 prefix and uses applyPath verbatim', async () => {

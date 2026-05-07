@@ -14,16 +14,14 @@ export function logForDebugging(
 
   const level = options?.level || 'info'
   const prefix = '[SandboxDebug]'
+  const lines = message.split('\n')
 
   // Always use stderr to avoid corrupting stdout JSON streams
-  switch (level) {
-    case 'error':
-      console.error(`${prefix} ${message}`)
-      break
-    case 'warn':
-      console.warn(`${prefix} ${message}`)
-      break
-    default:
-      console.error(`${prefix} ${message}`)
+  const write =
+    level === 'warn'
+      ? (line: string) => console.warn(line)
+      : (line: string) => console.error(line)
+  for (const line of lines) {
+    write(`${prefix} ${line}`)
   }
 }

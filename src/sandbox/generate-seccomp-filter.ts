@@ -2,14 +2,21 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as fs from 'node:fs'
 import { execSync } from 'node:child_process'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { logForDebugging } from '../utils/debug.js'
+// @ts-expect-error Bun file assets do not have TypeScript declarations.
+import embeddedApplySeccompX64 from '../../vendor/seccomp/x64/apply-seccomp' with { type: 'file' }
+// @ts-expect-error Bun file assets do not have TypeScript declarations.
+import embeddedApplySeccompArm64 from '../../vendor/seccomp/arm64/apply-seccomp' with { type: 'file' }
 
 // Cache for path lookups (key: explicit path or empty string, value: resolved path or null)
 const applySeccompPathCache = new Map<string, string | null>()
 
 // Cache for global npm paths (computed once per process)
 let cachedGlobalNpmPaths: string[] | null = null
+const embeddedApplySeccompPathCache = new Map<string, string | null>()
+const embeddedApplySeccompTempDirs = new Set<string>()
+let embeddedApplySeccompCleanupRegistered = false
 
 /**
  * Get paths to check for globally installed @anthropic-ai/sandbox-runtime package.
@@ -122,6 +129,68 @@ function getVendorArchitecture(): string | null {
   }
 }
 
+function getEmbeddedApplySeccompAssetPath(arch: string): string | null {
+  switch (arch) {
+    case 'x64':
+      return embeddedApplySeccompX64
+    case 'arm64':
+      return embeddedApplySeccompArm64
+    default:
+      return null
+  }
+}
+
+function cleanupEmbeddedApplySeccompTempDirs(): void {
+  for (const dir of embeddedApplySeccompTempDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+}
+
+function registerEmbeddedApplySeccompCleanup(): void {
+  if (embeddedApplySeccompCleanupRegistered) return
+  embeddedApplySeccompCleanupRegistered = true
+  process.once('exit', cleanupEmbeddedApplySeccompTempDirs)
+}
+
+function materializeEmbeddedApplySeccomp(arch: string): string | null {
+  if (embeddedApplySeccompPathCache.has(arch)) {
+    return embeddedApplySeccompPathCache.get(arch)!
+  }
+
+  const assetPath = getEmbeddedApplySeccompAssetPath(arch)
+  if (!assetPath) {
+    embeddedApplySeccompPathCache.set(arch, null)
+    return null
+  }
+
+  try {
+    const tempDir = fs.mkdtempSync(join(tmpdir(), `srt-apply-seccomp-${arch}-`))
+    const tempPath = join(tempDir, 'apply-seccomp')
+
+    fs.writeFileSync(tempPath, fs.readFileSync(assetPath), { mode: 0o700 })
+    fs.chmodSync(tempPath, 0o700)
+    embeddedApplySeccompTempDirs.add(tempDir)
+    registerEmbeddedApplySeccompCleanup()
+
+    logForDebugging(
+      `[SeccompFilter] Materialized embedded apply-seccomp binary: ${tempPath} (${arch})`,
+    )
+    embeddedApplySeccompPathCache.set(arch, tempPath)
+    return tempPath
+  } catch (err) {
+    logForDebugging(
+      `[SeccompFilter] Embedded apply-seccomp binary could not be materialized for ${arch}: ${err}`,
+      { level: 'error' },
+    )
+    embeddedApplySeccompPathCache.set(arch, null)
+    return null
+  }
+}
+
 /**
  * Get local paths to check for seccomp files (bundled or package installs).
  */
@@ -206,7 +275,19 @@ function findApplySeccompPath(seccompBinaryPath?: string): string | null {
     }
   }
 
+  const embeddedBinaryPath = materializeEmbeddedApplySeccomp(arch)
+  if (embeddedBinaryPath) {
+    return embeddedBinaryPath
+  }
+
   // Fallback: check global npm install (for native builds without bundled vendor)
+  if (process.env.SRT_DISABLE_GLOBAL_SECCOMP === '1') {
+    logForDebugging(
+      '[SeccompFilter] Global npm fallback disabled by SRT_DISABLE_GLOBAL_SECCOMP=1',
+    )
+    return null
+  }
+
   for (const globalBase of getGlobalNpmPaths()) {
     const binaryPath = join(
       globalBase,

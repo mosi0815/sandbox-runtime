@@ -502,6 +502,35 @@ describe('restriction pattern semantics', () => {
       },
     )
   })
+
+  describe('custom Linux bind mounts', () => {
+    it.if(isLinux)('adds bind mounts at synthetic targets', async () => {
+      const source = join(tmpdir(), 'srt-bind-source')
+      mkdirSync(source, { recursive: true })
+
+      const result = await wrapCommandWithSandboxLinux({
+        command,
+        needsNetworkRestriction: false,
+        readConfig: { denyOnly: [] },
+        writeConfig: { allowOnly: ['/tmp'], denyWithinAllow: [] },
+        bindMounts: [
+          {
+            source,
+            target: '/sessions/test/mnt/workspace',
+            mode: 'ro',
+          },
+        ],
+      })
+
+      expect(result).toContain('--dir')
+      expect(result).toContain('/sessions/test/mnt')
+      expect(result).toContain('--ro-bind')
+      expect(result).toContain(source)
+      expect(result).toContain('/sessions/test/mnt/workspace')
+
+      rmSync(source, { recursive: true, force: true })
+    })
+  })
 })
 
 /**

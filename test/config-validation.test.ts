@@ -321,4 +321,66 @@ describe('Config Validation', () => {
       expect(result.success).toBe(false)
     })
   })
+
+  describe('linux.bindMounts', () => {
+    const base = {
+      network: { allowedDomains: [], deniedDomains: [] },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    }
+
+    test('accepts absolute bind mount targets', () => {
+      const result = SandboxRuntimeConfigSchema.safeParse({
+        ...base,
+        linux: {
+          bindMounts: [
+            {
+              source: '/home/user/project',
+              target: '/sessions/session-1/mnt/workspace',
+              mode: 'rw',
+            },
+            {
+              source: '/home/user/uploads',
+              target: '/mnt/.virtiofs-root/shared/home/user/uploads',
+              mode: 'ro',
+            },
+          ],
+        },
+      })
+
+      expect(result.success).toBe(true)
+    })
+
+    test('rejects relative bind mount targets', () => {
+      const result = SandboxRuntimeConfigSchema.safeParse({
+        ...base,
+        linux: {
+          bindMounts: [
+            {
+              source: '/home/user/project',
+              target: 'sessions/session-1/mnt/workspace',
+            },
+          ],
+        },
+      })
+
+      expect(result.success).toBe(false)
+    })
+
+    test('rejects invalid bind modes', () => {
+      const result = SandboxRuntimeConfigSchema.safeParse({
+        ...base,
+        linux: {
+          bindMounts: [
+            {
+              source: '/home/user/project',
+              target: '/sessions/session-1/mnt/workspace',
+              mode: 'rwd',
+            },
+          ],
+        },
+      })
+
+      expect(result.success).toBe(false)
+    })
+  })
 })

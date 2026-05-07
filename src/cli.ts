@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import shellquote from 'shell-quote'
 import { Command } from 'commander'
 import { SandboxManager } from './index.js'
@@ -54,6 +54,11 @@ async function main(): Promise<void> {
       '-s, --settings <path>',
       'path to config file (default: ~/.srt-settings.json)',
     )
+    .option('--config-json <json>', 'sandbox config as a JSON string')
+    .option(
+      '--config-json-base64 <base64>',
+      'sandbox config as base64-encoded JSON',
+    )
     .option(
       '-c <command>',
       'run command string directly (like sh -c), no escaping applied',
@@ -70,6 +75,8 @@ async function main(): Promise<void> {
         options: {
           debug?: boolean
           settings?: string
+          configJson?: string
+          configJsonBase64?: string
           c?: string
           controlFd?: number
         },
@@ -82,15 +89,59 @@ async function main(): Promise<void> {
             process.env.SRT_DEBUG = 'true'
           }
 
-          // Load config from file
-          const configPath = options.settings || getDefaultConfigPath()
-          let runtimeConfig = loadConfig(configPath)
-
-          if (!runtimeConfig) {
-            logForDebugging(
-              `No config found at ${configPath}, using default config`,
+          if (options.configJson && options.configJsonBase64) {
+            throw new Error(
+              'Use only one of --config-json or --config-json-base64',
             )
-            runtimeConfig = getDefaultConfig()
+          }
+
+          // Determine command string before sandbox initialization so obvious
+          // usage errors don't start proxy servers or bwrap helpers.
+          let command: string
+          if (options.c) {
+            // -c mode: use command string directly, no escaping
+            command = options.c
+            logForDebugging(`Command string mode (-c): ${command}`)
+          } else if (commandArgs.length > 0) {
+            // Default mode: argv-style invocation. The result is later
+            // executed via `bash -c <command>`, so each arg must be
+            // shell-quoted to survive that re-parse — a plain join(' ')
+            // splits arguments containing whitespace (#157).
+            command = shellquote.quote(commandArgs)
+            logForDebugging(`Original command: ${command}`)
+          } else {
+            console.error(
+              'Error: No command specified. Use -c <command> or provide command arguments.',
+            )
+            process.exit(1)
+          }
+
+          let runtimeConfig: SandboxRuntimeConfig | null = null
+          if (options.configJsonBase64) {
+            const configJson = Buffer.from(
+              options.configJsonBase64,
+              'base64',
+            ).toString('utf8')
+            runtimeConfig = loadConfigFromString(configJson)
+            if (!runtimeConfig) {
+              throw new Error('Invalid JSON passed to --config-json-base64')
+            }
+          } else if (options.configJson) {
+            runtimeConfig = loadConfigFromString(options.configJson)
+            if (!runtimeConfig) {
+              throw new Error('Invalid JSON passed to --config-json')
+            }
+          } else {
+            // Load config from file
+            const configPath = options.settings || getDefaultConfigPath()
+            runtimeConfig = loadConfig(configPath)
+
+            if (!runtimeConfig) {
+              logForDebugging(
+                `No config found at ${configPath}, using default config`,
+              )
+              runtimeConfig = getDefaultConfig()
+            }
           }
 
           // Initialize sandbox with config
@@ -142,26 +193,6 @@ async function main(): Promise<void> {
           process.on('exit', () => {
             controlReader?.close()
           })
-
-          // Determine command string based on mode
-          let command: string
-          if (options.c) {
-            // -c mode: use command string directly, no escaping
-            command = options.c
-            logForDebugging(`Command string mode (-c): ${command}`)
-          } else if (commandArgs.length > 0) {
-            // Default mode: argv-style invocation. The result is later
-            // executed via `bash -c <command>`, so each arg must be
-            // shell-quoted to survive that re-parse — a plain join(' ')
-            // splits arguments containing whitespace (#157).
-            command = shellquote.quote(commandArgs)
-            logForDebugging(`Original command: ${command}`)
-          } else {
-            console.error(
-              'Error: No command specified. Use -c <command> or provide command arguments.',
-            )
-            process.exit(1)
-          }
 
           logForDebugging(
             JSON.stringify(

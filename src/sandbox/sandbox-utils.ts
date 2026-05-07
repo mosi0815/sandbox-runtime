@@ -271,12 +271,10 @@ export function normalizePathForSandbox(pathPattern: string): string {
 /**
  * Get recommended system paths that should be writable for commands to work properly
  *
- * WARNING: These default paths are intentionally broad for compatibility but may
- * allow access to files from other processes. In highly security-sensitive
- * environments, you should configure more restrictive write paths.
+ * Keep these defaults to device paths. Filesystem write access should come from
+ * caller config so hosts can decide whether /tmp is private tmpfs or a bind.
  */
 export function getDefaultWritePaths(): string[] {
-  const homeDir = homedir()
   const recommendedPaths = [
     '/dev/stdout',
     '/dev/stderr',
@@ -284,10 +282,6 @@ export function getDefaultWritePaths(): string[] {
     '/dev/tty',
     '/dev/dtracehelper',
     '/dev/autofs_nowait',
-    '/tmp/claude',
-    '/private/tmp/claude',
-    path.join(homeDir, '.npm/_logs'),
-    path.join(homeDir, '.claude/debug'),
   ]
 
   return recommendedPaths
@@ -300,11 +294,11 @@ export function generateProxyEnvVars(
   httpProxyPort?: number,
   socksProxyPort?: number,
 ): string[] {
-  // Respect the caller-provided temp dir if set, otherwise fall back to
-  // /tmp/claude. CLAUDE_CODE_TMPDIR is the current name; CLAUDE_TMPDIR is
-  // kept for backwards compatibility (#141).
+  // Respect the caller-provided temp dir if set, otherwise fall back to the
+  // sandbox's private /tmp. CLAUDE_CODE_TMPDIR is the current name;
+  // CLAUDE_TMPDIR is kept for backwards compatibility (#141).
   const tmpdir =
-    process.env.CLAUDE_CODE_TMPDIR || process.env.CLAUDE_TMPDIR || '/tmp/claude'
+    process.env.CLAUDE_CODE_TMPDIR || process.env.CLAUDE_TMPDIR || '/tmp'
   const envVars: string[] = [`SANDBOX_RUNTIME=1`, `TMPDIR=${tmpdir}`]
 
   // If no proxy ports provided, return minimal env vars

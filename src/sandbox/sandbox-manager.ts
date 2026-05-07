@@ -542,6 +542,10 @@ function getSeccompConfig(): SeccompConfig | undefined {
   return config?.seccomp
 }
 
+function getLinuxBindMounts() {
+  return config?.linux?.bindMounts
+}
+
 function getProxyPort(): number | undefined {
   return managerContext?.httpProxyPort
 }
@@ -587,7 +591,7 @@ async function wrapWithSandbox(
 
   // Get configs - use custom if provided, otherwise fall back to main config
   // If neither exists, defaults to empty arrays (most restrictive)
-  // Always include default system write paths (like /dev/null, /tmp/claude)
+  // Always include default device write paths (like /dev/null)
   //
   // Strip trailing /** and filter remaining globs on Linux (bwrap needs
   // real paths, not globs; macOS subpath matching is also recursive so
@@ -717,6 +721,7 @@ async function wrapWithSandbox(
         seccompConfig: getSeccompConfig(),
         bwrapPath: config?.bwrapPath,
         socatPath: config?.socatPath,
+        bindMounts: getLinuxBindMounts(),
         abortSignal,
       })
 

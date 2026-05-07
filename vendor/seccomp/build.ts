@@ -1,91 +1,91 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-if (process.platform !== 'linux') {
-  console.error('seccomp build: Linux only')
-  process.exit(1)
-}
-
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SRC = join(HERE, '..', 'seccomp-src')
+const VENDOR = dirname(HERE)
+const ROOT = dirname(VENDOR)
 
-const nodeArchToDir: Record<string, string> = { x64: 'x64', arm64: 'arm64' }
-const arch = nodeArchToDir[process.arch]
-if (!arch) {
-  console.error('seccomp build: unsupported arch ' + process.arch)
+const UPSTREAM_PACKAGE = '@anthropic-ai/sandbox-runtime'
+const UPSTREAM_VERSION = readUpstreamVersion()
+const TARBALL_URL = `https://registry.npmjs.org/${UPSTREAM_PACKAGE}/-/sandbox-runtime-${UPSTREAM_VERSION}.tgz`
+
+type Target = {
+  name: 'x64' | 'arm64'
+  tarPath: string
+}
+
+const TARGETS: Target[] = [
+  { name: 'x64', tarPath: 'package/vendor/seccomp/x64/apply-seccomp' },
+  { name: 'arm64', tarPath: 'package/vendor/seccomp/arm64/apply-seccomp' },
+]
+
+function fail(message: string): never {
+  console.error(message)
   process.exit(1)
 }
-const OUT = join(HERE, arch)
 
-function run(argv: string[]): void {
+function readUpstreamVersion(): string {
+  const pkgPath = join(ROOT, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+    version?: unknown
+  }
+  if (typeof pkg.version !== 'string' || pkg.version.length === 0) {
+    fail(`seccomp build: missing "version" in ${pkgPath}`)
+  }
+  return pkg.version
+}
+
+function run(argv: string[], cwd?: string): void {
   const [cmd, ...args] = argv
-  const r = spawnSync(cmd, args, { stdio: 'inherit' })
+  const r = spawnSync(cmd, args, { cwd, stdio: 'inherit' })
   if (r.status !== 0) {
-    console.error(argv.join(' ') + ' exited ' + (r.status ?? r.signal))
-    process.exit(1)
+    fail(`${argv.join(' ')} exited ${r.status ?? r.signal}`)
   }
 }
 
-function toCArray(bytes: Buffer): string {
-  const hex = Array.from(bytes, b => '0x' + b.toString(16).padStart(2, '0'))
-  const lines: string[] = []
-  for (let i = 0; i < hex.length; i += 8) {
-    lines.push('    ' + hex.slice(i, i + 8).join(', ') + ',')
+async function downloadTarball(destPath: string): Promise<void> {
+  console.log(`fetching ${TARBALL_URL}`)
+  const response = await fetch(TARBALL_URL)
+  if (!response.ok) {
+    fail(
+      `seccomp build: GET ${TARBALL_URL} -> ${response.status} ${response.statusText}`,
+    )
   }
-  return lines.join('\n')
+  writeFileSync(destPath, new Uint8Array(await response.arrayBuffer()))
 }
 
-mkdirSync(OUT, { recursive: true })
+const workDir = mkdtempSync(join(tmpdir(), 'srt-seccomp-'))
+try {
+  const tarballPath = join(workDir, 'package.tgz')
+  await downloadTarball(tarballPath)
 
-const cflags = ['-static', '-O2', '-Wall', '-Wextra']
-
-const gen = join(OUT, 'seccomp-unix-block')
-run([
-  'gcc',
-  ...cflags,
-  '-o',
-  gen,
-  join(SRC, 'seccomp-unix-block.c'),
-  '-lseccomp',
-])
-
-const bpf: Record<string, Buffer> = {}
-for (const target of ['x86_64', 'aarch64']) {
-  const tmp = join(OUT, target + '.bpf')
-  run([gen, tmp, target])
-  bpf[target] = readFileSync(tmp)
-  rmSync(tmp)
+  for (const target of TARGETS) {
+    run(['tar', '-xzf', tarballPath, '-C', workDir, target.tarPath])
+    const extracted = join(workDir, target.tarPath)
+    if (!existsSync(extracted)) {
+      fail(
+        `seccomp build: ${target.tarPath} not present in ${UPSTREAM_PACKAGE}@${UPSTREAM_VERSION}`,
+      )
+    }
+    const outDir = join(HERE, target.name)
+    const outPath = join(outDir, 'apply-seccomp')
+    mkdirSync(outDir, { recursive: true })
+    copyFileSync(extracted, outPath)
+    chmodSync(outPath, 0o755)
+    console.log(`extracted ${target.name} -> ${outPath}`)
+  }
+} finally {
+  rmSync(workDir, { recursive: true, force: true })
 }
-rmSync(gen)
-
-const header = join(OUT, 'unix-block-bpf.h')
-writeFileSync(
-  header,
-  '#if defined(__x86_64__)\n' +
-    'static const unsigned char unix_block_bpf[] = {\n' +
-    toCArray(bpf.x86_64) +
-    '\n};\n' +
-    '#elif defined(__aarch64__)\n' +
-    'static const unsigned char unix_block_bpf[] = {\n' +
-    toCArray(bpf.aarch64) +
-    '\n};\n' +
-    '#else\n' +
-    '#error "unsupported architecture for unix-block BPF filter"\n' +
-    '#endif\n',
-)
-
-run([
-  'gcc',
-  ...cflags,
-  '-I',
-  OUT,
-  '-o',
-  join(OUT, 'apply-seccomp'),
-  join(SRC, 'apply-seccomp.c'),
-])
-run(['strip', join(OUT, 'apply-seccomp')])
-rmSync(header)
-
-console.log('built ' + join(OUT, 'apply-seccomp'))

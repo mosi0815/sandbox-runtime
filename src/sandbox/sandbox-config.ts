@@ -252,6 +252,25 @@ export const SeccompConfigSchema = z.object({
     ),
 })
 
+export const LinuxBindMountSchema = z.object({
+  source: filesystemPathSchema.describe('Host path to expose inside bwrap'),
+  target: filesystemPathSchema
+    .refine(val => isAbsolute(val), {
+      message: 'Bind mount target must be absolute',
+    })
+    .describe('Absolute path where the source appears inside bwrap'),
+  mode: z.enum(['ro', 'rw']).optional().describe('Bind mode. Defaults to rw.'),
+})
+
+export const LinuxConfigSchema = z.object({
+  bindMounts: z
+    .array(LinuxBindMountSchema)
+    .optional()
+    .describe(
+      'Additional Linux bwrap bind mounts. This can expose host paths at synthetic sandbox paths such as /sessions/<name>/mnt/<mount>.',
+    ),
+})
+
 /**
  * Main configuration schema for Sandbox Runtime validation
  */
@@ -308,6 +327,7 @@ export const SandboxRuntimeConfigSchema = z.object({
       'Linux only: absolute path to the socat binary. ' +
         'When set, this path is used directly instead of resolving "socat" via PATH.',
     ),
+  linux: LinuxConfigSchema.optional().describe('Linux-only bwrap extensions.'),
 })
 
 // Export inferred types
@@ -320,4 +340,6 @@ export type IgnoreViolationsConfig = z.infer<
 >
 export type RipgrepConfig = z.infer<typeof RipgrepConfigSchema>
 export type SeccompConfig = z.infer<typeof SeccompConfigSchema>
+export type LinuxBindMount = z.infer<typeof LinuxBindMountSchema>
+export type LinuxConfig = z.infer<typeof LinuxConfigSchema>
 export type SandboxRuntimeConfig = z.infer<typeof SandboxRuntimeConfigSchema>

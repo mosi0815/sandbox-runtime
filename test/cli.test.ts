@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /**
@@ -13,21 +15,37 @@ function getCliPath(): string {
  * Run the CLI with given arguments and return the result
  */
 function runCli(args: string[], options?: { input?: string; debug?: boolean }) {
-  const result = spawnSync('bun', ['run', getCliPath(), ...args], {
-    encoding: 'utf-8',
-    input: options?.input,
-    env: {
-      ...process.env,
-      // Use a non-existent config to get default behavior
-      HOME: '/tmp/cli-test-nonexistent',
-      // Enable SRT_DEBUG if debug option is set
-      ...(options?.debug ? { SRT_DEBUG: 'true' } : {}),
-    },
-  })
-  return {
-    stdout: result.stdout,
-    stderr: result.stderr,
-    status: result.status,
+  const home = mkdtempSync(join(tmpdir(), 'cli-test-home-'))
+  writeFileSync(
+    join(home, '.srt-settings.json'),
+    JSON.stringify({
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        allowAllUnixSockets: true,
+      },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    }),
+  )
+  try {
+    const result = spawnSync('bun', ['run', getCliPath(), ...args], {
+      encoding: 'utf-8',
+      input: options?.input,
+      env: {
+        ...process.env,
+        HOME: home,
+        SRT_DISABLE_GLOBAL_SECCOMP: '1',
+        // Enable SRT_DEBUG if debug option is set
+        ...(options?.debug ? { SRT_DEBUG: 'true' } : {}),
+      },
+    })
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      status: result.status,
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
   }
 }
 
@@ -115,6 +133,60 @@ describe('CLI', () => {
       const result = runCli(['printf', '%s', '$HOME;|&'])
       expect(result.stdout).toBe('$HOME;|&')
       expect(result.status).toBe(0)
+    })
+  })
+
+  describe('inline config', () => {
+    const inlineConfig = {
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        allowAllUnixSockets: true,
+      },
+      filesystem: { denyRead: [], allowWrite: ['/tmp'], denyWrite: [] },
+      linux: {
+        bindMounts: [
+          { source: '/tmp', target: '/sessions/test/mnt/tmp', mode: 'ro' },
+        ],
+      },
+    }
+
+    test('accepts config as JSON string', () => {
+      const result = runCli([
+        '--config-json',
+        JSON.stringify(inlineConfig),
+        'echo',
+        'inline',
+      ])
+      expect(result.stdout.trim()).toBe('inline')
+      expect(result.status).toBe(0)
+    })
+
+    test('accepts config as base64 JSON string', () => {
+      const encoded = Buffer.from(JSON.stringify(inlineConfig)).toString(
+        'base64',
+      )
+      const result = runCli(['--config-json-base64', encoded, 'echo', 'b64'])
+      expect(result.stdout.trim()).toBe('b64')
+      expect(result.status).toBe(0)
+    })
+
+    test('rejects multiple inline config sources', () => {
+      const encoded = Buffer.from(JSON.stringify(inlineConfig)).toString(
+        'base64',
+      )
+      const result = runCli([
+        '--config-json',
+        JSON.stringify(inlineConfig),
+        '--config-json-base64',
+        encoded,
+        'echo',
+        'bad',
+      ])
+      expect(result.stderr).toContain(
+        'Use only one of --config-json or --config-json-base64',
+      )
+      expect(result.status).toBe(1)
     })
   })
 

@@ -1,6 +1,10 @@
 node_modules
 dist
+.bun-install/
+.bun-tmp/
+srt
 .claude
 .DS_Store
 vendor/seccomp/x64/
 vendor/seccomp/arm64/
+.idea
