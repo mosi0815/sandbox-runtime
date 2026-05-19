@@ -12,46 +12,61 @@ import { z } from 'zod'
  * Schema for domain patterns (e.g., "example.com", "*.npmjs.org")
  * Validates that domain patterns are safe and don't include overly broad wildcards
  */
-const domainPatternSchema = z.string().refine(
-  val => {
-    // Reject protocols, paths, ports, etc.
-    if (val.includes('://') || val.includes('/') || val.includes(':')) {
+function isValidDomainPattern(val: string, allowMatchAll: boolean): boolean {
+  // Reject protocols, paths, ports, etc.
+  if (val.includes('://') || val.includes('/') || val.includes(':')) {
+    return false
+  }
+
+  // Allow bare "*" only in allow/deny lists, where Claude Desktop sends it
+  // to mean "match every host". The MITM domain list stays strict.
+  if (val === '*') return allowMatchAll
+
+  // Allow localhost
+  if (val === 'localhost') return true
+
+  // Allow wildcard domains like *.example.com
+  if (val.startsWith('*.')) {
+    const domain = val.slice(2)
+    // After the *. there must be a valid domain with at least one more dot
+    // e.g., *.example.com is valid, *.com is not (too broad)
+    if (
+      !domain.includes('.') ||
+      domain.startsWith('.') ||
+      domain.endsWith('.')
+    ) {
       return false
     }
+    // Count dots - must have at least 2 parts after the wildcard (e.g., example.com)
+    const parts = domain.split('.')
+    return parts.length >= 2 && parts.every(p => p.length > 0)
+  }
 
-    // Allow localhost
-    if (val === 'localhost') return true
+  // Reject any other use of wildcards (e.g., *., evil*, etc.)
+  if (val.includes('*')) {
+    return false
+  }
 
-    // Allow wildcard domains like *.example.com
-    if (val.startsWith('*.')) {
-      const domain = val.slice(2)
-      // After the *. there must be a valid domain with at least one more dot
-      // e.g., *.example.com is valid, *.com is not (too broad)
-      if (
-        !domain.includes('.') ||
-        domain.startsWith('.') ||
-        domain.endsWith('.')
-      ) {
-        return false
-      }
-      // Count dots - must have at least 2 parts after the wildcard (e.g., example.com)
-      const parts = domain.split('.')
-      return parts.length >= 2 && parts.every(p => p.length > 0)
-    }
+  // Regular domains must have at least one dot and only valid characters
+  return val.includes('.') && !val.startsWith('.') && !val.endsWith('.')
+}
 
-    // Reject any other use of wildcards (e.g., *, *., etc.)
-    if (val.includes('*')) {
-      return false
-    }
-
-    // Regular domains must have at least one dot and only valid characters
-    return val.includes('.') && !val.startsWith('.') && !val.endsWith('.')
-  },
-  {
+const domainPatternSchema = z
+  .string()
+  .refine(val => isValidDomainPattern(val, false), {
     message:
       'Invalid domain pattern. Must be a valid domain (e.g., "example.com") or wildcard (e.g., "*.example.com"). Overly broad patterns like "*.com" or "*" are not allowed for security reasons.',
-  },
-)
+  })
+
+// Allow/deny lists additionally accept the bare "*" wildcard to match every
+// host — Claude Desktop emits this when the user has approved unrestricted
+// network access.
+const allowDenyDomainPatternSchema = z
+  .string()
+  .refine(val => isValidDomainPattern(val, true), {
+    message:
+      'Invalid domain pattern. Must be a valid domain (e.g., "example.com"), a wildcard (e.g., "*.example.com"), or "*" to match all hosts.',
+  })
 
 /**
  * Schema for filesystem paths
@@ -116,11 +131,13 @@ const ParentProxyConfigSchema = z.object({
  */
 export const NetworkConfigSchema = z.object({
   allowedDomains: z
-    .array(domainPatternSchema)
-    .describe('List of allowed domains (e.g., ["github.com", "*.npmjs.org"])'),
+    .array(allowDenyDomainPatternSchema)
+    .describe(
+      'List of allowed domains (e.g., ["github.com", "*.npmjs.org"]). Use ["*"] to allow all hosts.',
+    ),
   deniedDomains: z
-    .array(domainPatternSchema)
-    .describe('List of denied domains'),
+    .array(allowDenyDomainPatternSchema)
+    .describe('List of denied domains. Use ["*"] to deny all hosts.'),
   allowUnixSockets: z
     .array(z.string())
     .optional()

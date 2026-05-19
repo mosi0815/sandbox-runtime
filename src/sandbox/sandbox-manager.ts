@@ -86,6 +86,10 @@ function registerCleanup(): void {
 }
 
 function matchesDomainPattern(hostname: string, pattern: string): boolean {
+  // Bare "*" means "match every host" — emitted by Claude Desktop when the
+  // user has approved unrestricted network access.
+  if (pattern === '*') return true
+
   const h = hostname.toLowerCase()
   // Support wildcard patterns like *.example.com. Never apply wildcard
   // suffix matching to IP literals — an IPv6 zone-ID payload like

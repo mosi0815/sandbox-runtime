@@ -127,6 +127,20 @@ describe('Config Validation', () => {
     expect(result.success).toBe(false)
   })
 
+  test('should accept bare "*" in allow/deny lists as match-all', () => {
+    // Claude Desktop sends ["*"] when the user has approved unrestricted
+    // network access. Both lists must accept it.
+    const config = {
+      network: {
+        allowedDomains: ['*'],
+        deniedDomains: ['*'],
+      },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    }
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+  })
+
   test('should validate wildcard domains correctly', () => {
     const validWildcards = ['*.example.com', '*.github.io', '*.co.uk']
 
