@@ -171,6 +171,47 @@ describe('CLI', () => {
       expect(result.status).toBe(0)
     })
 
+    test('accepts config as JSON file', () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'cli-config-json-file-'))
+      const configPath = join(tmpDir, 'config.json')
+      writeFileSync(configPath, JSON.stringify(inlineConfig))
+
+      try {
+        const result = runCli([
+          '--config-json-file',
+          configPath,
+          'echo',
+          'file',
+        ])
+        expect(result.stdout.trim()).toBe('file')
+        expect(result.status).toBe(0)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
+
+    test('accepts config as base64 JSON file', () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'cli-config-json-b64-file-'))
+      const configPath = join(tmpDir, 'config.b64')
+      const encoded = Buffer.from(JSON.stringify(inlineConfig)).toString(
+        'base64',
+      )
+      writeFileSync(configPath, `${encoded}\n`)
+
+      try {
+        const result = runCli([
+          '--config-json-base64-file',
+          configPath,
+          'echo',
+          'b64-file',
+        ])
+        expect(result.stdout.trim()).toBe('b64-file')
+        expect(result.status).toBe(0)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
+
     test('rejects multiple inline config sources', () => {
       const encoded = Buffer.from(JSON.stringify(inlineConfig)).toString(
         'base64',
@@ -184,7 +225,59 @@ describe('CLI', () => {
         'bad',
       ])
       expect(result.stderr).toContain(
-        'Use only one of --config-json or --config-json-base64',
+        'Use only one of --config-json, --config-json-base64, --config-json-file, or --config-json-base64-file',
+      )
+      expect(result.status).toBe(1)
+    })
+
+    test('rejects multiple config sources across inline and file options', () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'cli-config-conflict-'))
+      const configPath = join(tmpDir, 'config.json')
+      writeFileSync(configPath, JSON.stringify(inlineConfig))
+
+      try {
+        const result = runCli([
+          '--config-json',
+          JSON.stringify(inlineConfig),
+          '--config-json-file',
+          configPath,
+          'echo',
+          'bad',
+        ])
+        expect(result.stderr).toContain(
+          'Use only one of --config-json, --config-json-base64, --config-json-file, or --config-json-base64-file',
+        )
+        expect(result.status).toBe(1)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
+
+    test('rejects invalid config JSON file', () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'cli-config-invalid-file-'))
+      const configPath = join(tmpDir, 'config.json')
+      writeFileSync(configPath, '{ invalid json }')
+
+      try {
+        const result = runCli(['--config-json-file', configPath, 'echo', 'bad'])
+        expect(result.stderr).toContain(
+          'Invalid JSON passed to --config-json-file',
+        )
+        expect(result.status).toBe(1)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
+
+    test('rejects unreadable config JSON file path', () => {
+      const result = runCli([
+        '--config-json-file',
+        '/nonexistent/config.json',
+        'echo',
+        'bad',
+      ])
+      expect(result.stderr).toContain(
+        'Failed to read --config-json-file file /nonexistent/config.json',
       )
       expect(result.status).toBe(1)
     })

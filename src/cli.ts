@@ -36,6 +36,16 @@ function getDefaultConfig(): SandboxRuntimeConfig {
   }
 }
 
+function readFileOption(flagName: string, filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf-8')
+  } catch (error) {
+    throw new Error(
+      `Failed to read ${flagName} file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
 async function main(): Promise<void> {
   const program = new Command()
 
@@ -59,6 +69,11 @@ async function main(): Promise<void> {
       '--config-json-base64 <base64>',
       'sandbox config as base64-encoded JSON',
     )
+    .option('--config-json-file <path>', 'path to sandbox config JSON file')
+    .option(
+      '--config-json-base64-file <path>',
+      'path to file containing base64-encoded sandbox config JSON',
+    )
     .option(
       '-c <command>',
       'run command string directly (like sh -c), no escaping applied',
@@ -77,6 +92,8 @@ async function main(): Promise<void> {
           settings?: string
           configJson?: string
           configJsonBase64?: string
+          configJsonFile?: string
+          configJsonBase64File?: string
           c?: string
           controlFd?: number
         },
@@ -89,9 +106,16 @@ async function main(): Promise<void> {
             process.env.SRT_DEBUG = 'true'
           }
 
-          if (options.configJson && options.configJsonBase64) {
+          const configSources = [
+            options.configJson,
+            options.configJsonBase64,
+            options.configJsonFile,
+            options.configJsonBase64File,
+          ].filter(Boolean)
+
+          if (configSources.length > 1) {
             throw new Error(
-              'Use only one of --config-json or --config-json-base64',
+              'Use only one of --config-json, --config-json-base64, --config-json-file, or --config-json-base64-file',
             )
           }
 
@@ -117,7 +141,31 @@ async function main(): Promise<void> {
           }
 
           let runtimeConfig: SandboxRuntimeConfig | null = null
-          if (options.configJsonBase64) {
+          if (options.configJsonBase64File) {
+            const encodedConfigJson = readFileOption(
+              '--config-json-base64-file',
+              options.configJsonBase64File,
+            ).trim()
+            const configJson = Buffer.from(
+              encodedConfigJson,
+              'base64',
+            ).toString('utf8')
+            runtimeConfig = loadConfigFromString(configJson)
+            if (!runtimeConfig) {
+              throw new Error(
+                'Invalid JSON passed to --config-json-base64-file',
+              )
+            }
+          } else if (options.configJsonFile) {
+            const configJson = readFileOption(
+              '--config-json-file',
+              options.configJsonFile,
+            )
+            runtimeConfig = loadConfigFromString(configJson)
+            if (!runtimeConfig) {
+              throw new Error('Invalid JSON passed to --config-json-file')
+            }
+          } else if (options.configJsonBase64) {
             const configJson = Buffer.from(
               options.configJsonBase64,
               'base64',

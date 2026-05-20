@@ -8,3 +8,7 @@ srt
 vendor/seccomp/x64/
 vendor/seccomp/arm64/
 .idea
+/scripts/*.d.ts
+/scripts/*.d.ts.map
+/scripts/*.js
+/scripts/*.js.map
