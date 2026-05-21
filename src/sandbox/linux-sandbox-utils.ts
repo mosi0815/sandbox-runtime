@@ -24,6 +24,12 @@ import { getApplySeccompBinaryPath } from './generate-seccomp-filter.js'
 import type { LinuxBindMount, SeccompConfig } from './sandbox-config.js'
 
 export interface LinuxNetworkBridgeContext {
+  /**
+   * Parent directory holding both bridge sockets. Lives under tmpdir() so the
+   * sandbox can re-allow this single path via allowWithinDeny when the user
+   * denies /tmp wholesale.
+   */
+  socketDir: string
   httpSocketPath: string
   socksSocketPath: string
   httpBridgeProcess: ChildProcess
@@ -680,8 +686,12 @@ export async function initializeLinuxNetworkBridge(
 ): Promise<LinuxNetworkBridgeContext> {
   const socat = socatPath ?? 'socat'
   const socketId = randomBytes(8).toString('hex')
-  const httpSocketPath = join(tmpdir(), `claude-http-${socketId}.sock`)
-  const socksSocketPath = join(tmpdir(), `claude-socks-${socketId}.sock`)
+  // Bundle both sockets under a dedicated dir so the sandbox can re-bind
+  // exactly one path through allowWithinDeny when /tmp is on denyRead.
+  const socketDir = join(tmpdir(), `claude-sbr-${socketId}`)
+  fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 })
+  const httpSocketPath = join(socketDir, 'http.sock')
+  const socksSocketPath = join(socketDir, 'socks.sock')
 
   // Start HTTP bridge
   const httpSocatArgs = [
@@ -794,6 +804,7 @@ export async function initializeLinuxNetworkBridge(
   }
 
   return {
+    socketDir,
     httpSocketPath,
     socksSocketPath,
     httpBridgeProcess,

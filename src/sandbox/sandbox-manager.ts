@@ -582,6 +582,10 @@ function getLinuxSocksSocketPath(): string | undefined {
   return managerContext?.linuxBridge?.socksSocketPath
 }
 
+function getLinuxBridgeSocketDir(): string | undefined {
+  return managerContext?.linuxBridge?.socketDir
+}
+
 /**
  * Wait for network initialization to complete if already in progress
  * Returns true if initialized successfully, false otherwise
@@ -664,6 +668,14 @@ async function wrapWithSandbox(
   // under a user-configured denyRead.
   if (mitmCA) {
     expandedAllowRead.push(mitmCA.certPath)
+  }
+  // Re-allow the Linux network bridge socket dir for the same reason: when
+  // the user puts /tmp on denyRead, the tmpfs would mask the sockets the
+  // sandbox needs to reach the host HTTP/SOCKS proxies. The re-allow loop
+  // in linux-sandbox-utils is a no-op if /tmp isn't denied.
+  const bridgeSocketDir = getLinuxBridgeSocketDir()
+  if (bridgeSocketDir) {
+    expandedAllowRead.push(bridgeSocketDir)
   }
   const readConfig = {
     denyOnly: expandedDenyRead,
@@ -926,12 +938,8 @@ async function reset(): Promise<void> {
   }
 
   if (managerContext?.linuxBridge) {
-    const {
-      httpSocketPath,
-      socksSocketPath,
-      httpBridgeProcess,
-      socksBridgeProcess,
-    } = managerContext.linuxBridge
+    const { socketDir, httpBridgeProcess, socksBridgeProcess } =
+      managerContext.linuxBridge
 
     // Kill both bridges and wait for them to exit
     await Promise.all([
@@ -939,24 +947,12 @@ async function reset(): Promise<void> {
       killBridgeProcess(socksBridgeProcess, 'SOCKS'),
     ])
 
-    // Clean up sockets
-    if (httpSocketPath) {
+    if (socketDir) {
       try {
-        fs.rmSync(httpSocketPath, { force: true })
-        logForDebugging('Cleaned up HTTP socket')
+        fs.rmSync(socketDir, { recursive: true, force: true })
+        logForDebugging('Cleaned up bridge socket dir')
       } catch (err) {
-        logForDebugging(`HTTP socket cleanup error: ${err}`, {
-          level: 'error',
-        })
-      }
-    }
-
-    if (socksSocketPath) {
-      try {
-        fs.rmSync(socksSocketPath, { force: true })
-        logForDebugging('Cleaned up SOCKS socket')
-      } catch (err) {
-        logForDebugging(`SOCKS socket cleanup error: ${err}`, {
+        logForDebugging(`Bridge socket dir cleanup error: ${err}`, {
           level: 'error',
         })
       }
