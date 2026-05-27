@@ -82,13 +82,16 @@ function createTestConfig(
 }
 
 /** Run a command inside the Windows sandbox and capture output. */
-async function runSandboxed(command: string): Promise<{
+async function runSandboxed(
+  command: string,
+  timeoutMs = 30_000,
+): Promise<{
   stdout: string
   stderr: string
   status: number | null
 }> {
   const argv = await SandboxManager.wrapWithSandboxArgv(command)
-  return spawnAsync(argv[0], argv.slice(1), { timeout: 30_000 })
+  return spawnAsync(argv[0], argv.slice(1), { timeout: timeoutMs })
 }
 
 type RunResult = { stdout: string; stderr: string; status: number | null }
@@ -104,10 +107,11 @@ async function runSandboxedUntil(
   command: string,
   ok: (r: RunResult) => boolean,
   attempts = 2,
+  timeoutMs = 30_000,
 ): Promise<RunResult> {
   let last: RunResult = { stdout: '', stderr: '', status: null }
   for (let i = 0; i < attempts; i++) {
-    last = await runSandboxed(command)
+    last = await runSandboxed(command, timeoutMs)
     if (ok(last)) return last
   }
   return last
@@ -442,14 +446,28 @@ describe.if(isWindows)('Windows sandbox: SandboxManager network', () => {
       SandboxManager.updateConfig(
         createTestConfig(['example.com', 'github.com']),
       )
+      // GIT_CURL_VERBOSE/GIT_TRACE_CURL reveal whether git tunnels via
+      // the proxy (CONNECT to 127.0.0.1:<port>) or wrongly goes DIRECT
+      // to github (→ WFP-fenced → 60s hang). Captured into the failure
+      // message so a recurrence self-explains. NO_DATA keeps the trace
+      // to headers/connection (no body dumps). 45s/attempt: git
+      // smart-HTTP is heavier than curl.
+      const REPO = 'https://github.com/anthropic-experimental/sandbox-runtime'
       const r = await runSandboxedUntil(
-        'git ls-remote --heads https://github.com/anthropic-experimental/sandbox-runtime',
+        `set GIT_TRACE=1&&set GIT_CURL_VERBOSE=1&&set GIT_TRACE_CURL=1&&set GIT_TRACE_CURL_NO_DATA=1&&git ls-remote --heads ${REPO}`,
         x => x.status === 0 && /refs\/heads/.test(x.stdout),
+        2,
+        45_000,
       )
-      expectStatus('B4', r, [0])
-      expect(r.stdout).toMatch(/refs\/heads/)
+      if (r.status !== 0 || !/refs\/heads/.test(r.stdout)) {
+        throw new Error(
+          `B4 git ls-remote via proxy failed: status=${r.status} · ` +
+            `stdout=${JSON.stringify(r.stdout.slice(0, 400))} · ` +
+            `git-trace(tail)=${JSON.stringify(r.stderr.slice(-3500))}`,
+        )
+      }
     },
-    90_000,
+    120_000,
   )
 
   it.skipIf(!hasTool('node'))(
@@ -687,14 +705,23 @@ describe.if(isWindows)('Windows sandbox: SandboxManager network', () => {
       SandboxManager.updateConfig(
         createTestConfig(['example.com', 'github.com']),
       )
+      // Same proxy/direct diagnosis as B4, via git-bash. Inline env
+      // prefix (bash) + GIT_*_VERBOSE trace captured on failure.
       const r = await runSandboxedUntil(
-        `"${GIT_BASH}" -c "git ls-remote --heads https://github.com/anthropic-experimental/sandbox-runtime"`,
+        `"${GIT_BASH}" -c "GIT_TRACE=1 GIT_CURL_VERBOSE=1 GIT_TRACE_CURL=1 GIT_TRACE_CURL_NO_DATA=1 git ls-remote --heads https://github.com/anthropic-experimental/sandbox-runtime"`,
         x => x.status === 0 && /refs\/heads/.test(x.stdout),
+        2,
+        45_000,
       )
-      expectStatus('E2', r, [0])
-      expect(r.stdout).toMatch(/refs\/heads/)
+      if (r.status !== 0 || !/refs\/heads/.test(r.stdout)) {
+        throw new Error(
+          `E2 git-bash ls-remote via proxy failed: status=${r.status} · ` +
+            `stdout=${JSON.stringify(r.stdout.slice(0, 400))} · ` +
+            `git-trace(tail)=${JSON.stringify(r.stderr.slice(-3500))}`,
+        )
+      }
     },
-    90_000,
+    120_000,
   )
 
   it.skipIf(!existsSync(MSYS2_WGET))(
