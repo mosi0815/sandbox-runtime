@@ -252,6 +252,30 @@ Assert-EnvPassthrough 'HTTPS_PROXY' "http://127.0.0.1:$PortLo"
 Assert-EnvPassthrough 'NO_PROXY'    'localhost,127.0.0.1'
 Write-Host 'E5 ok: exec forwards broker env (incl. proxy set) to child verbatim'
 
+# ── E5b: broker restores the twin casing of *_PROXY vars ────────
+# The host spawn layer (Node/bun child_process on win32) keeps only ONE
+# casing of an env key, but Cygwin/MSYS2 children have case-sensitive
+# environments whose tools read the lowercase names — so exec appends
+# the missing twin (identical value, never invented). The broker process
+# itself can only hold one casing (Win32 env is case-insensitive), so
+# setting HTTP_PROXY here and finding BOTH casings in the child proves
+# the repair. `set http` lists matching vars with their STORED casing;
+# -clike is the case-SENSITIVE match.
+Invoke-WithEnv 'HTTP_PROXY' "http://127.0.0.1:$PortLo" {
+  $r = Exec @('--', $cmd, '/c', 'set http')
+  if ($r.exit -ne 0) {
+    throw "E5b: 'set http' exited $($r.exit). out: $($r.out)"
+  }
+  $lines = $r.out -split "`r?`n"
+  if (-not ($lines | Where-Object { $_ -clike 'http_proxy=*' })) {
+    throw "E5b: lowercase http_proxy twin missing in child. out: $($r.out)"
+  }
+  if (-not ($lines | Where-Object { $_ -clike 'HTTP_PROXY=*' })) {
+    throw "E5b: uppercase HTTP_PROXY missing in child. out: $($r.out)"
+  }
+}
+Write-Host 'E5b ok: broker restores the lowercase twin of proxy vars for the child'
+
 # ── E6: self-protect — child cannot OpenProcess the broker ──────
 # `launch::run` exports the broker PID. The child P/Invokes
 # OpenProcess directly with PROCESS_VM_READ — an unambiguous mask

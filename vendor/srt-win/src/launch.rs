@@ -341,9 +341,13 @@ pub fn run(spec: &ExecSpec<'_>) -> Result<u32> {
 /// or deduplicated, so if both `HTTP_PROXY` and `http_proxy` are
 /// present both survive into the child.
 ///
-/// The one synthesized entry is `SANDBOX_RUNTIME_WIN_BROKER_PID`,
-/// which the self-protect smoke test reads to probe `OpenProcess`
-/// against the broker — it is not proxy-related.
+/// Two kinds of entries are added on top of the verbatim copy:
+/// - `SANDBOX_RUNTIME_WIN_BROKER_PID`, which the self-protect smoke
+///   test reads to probe `OpenProcess` against the broker — not
+///   proxy-related.
+/// - The missing-case variants of `*_PROXY` variables (see
+///   [`add_proxy_case_twins`]) — casing repair of caller-provided
+///   values, not proxy synthesis.
 fn build_env_block() -> Vec<u16> {
     let mut entries: Vec<(String, String)> = std::env::vars().collect();
 
@@ -353,6 +357,8 @@ fn build_env_block() -> Vec<u16> {
         "SANDBOX_RUNTIME_WIN_BROKER_PID".to_string(),
         std::process::id().to_string(),
     ));
+
+    add_proxy_case_twins(&mut entries);
 
     // Order the block case-insensitively by name; values pass through
     // verbatim. No dedup — case-variant duplicates are preserved.
@@ -368,6 +374,32 @@ fn build_env_block() -> Vec<u16> {
     }
     out.push(0);
     out
+}
+
+/// Re-add the missing-case variants of `*_PROXY` variables (the host
+/// spawn layer collapses case-duplicate keys) so that Cygwin/MSYS2
+/// programs — which see a case-sensitive environment — still find
+/// them. For every entry whose name ends with `_PROXY`
+/// (case-insensitively), the all-uppercase and all-lowercase forms of
+/// that name are appended where missing, with the same value. Existing
+/// keys are never overwritten and nothing is added for names that are
+/// not `*_PROXY`.
+fn add_proxy_case_twins(entries: &mut Vec<(String, String)>) {
+    let mut names: std::collections::HashSet<String> =
+        entries.iter().map(|(k, _)| k.clone()).collect();
+    let mut twins: Vec<(String, String)> = Vec::new();
+    for (k, v) in entries.iter() {
+        if !k.to_ascii_uppercase().ends_with("_PROXY") {
+            continue;
+        }
+        for form in [k.to_ascii_uppercase(), k.to_ascii_lowercase()] {
+            if !names.contains(&form) {
+                names.insert(form.clone());
+                twins.push((form, v.clone()));
+            }
+        }
+    }
+    entries.extend(twins);
 }
 
 // ─── Command-line quoting ───────────────────────────────────────────
@@ -667,5 +699,41 @@ mod tests {
         let args = vec![r#"a "b"#.into()];
         let line = build_cmdline(exe, &args);
         assert!(line.ends_with(r#""a \"b""#), "got: {line}");
+    }
+
+    #[test]
+    fn proxy_case_twins_suffix_rule_covers_any_proxy_var() {
+        let mut entries = vec![
+            // Any *_PROXY name is twinned, not just the standard trio.
+            (
+                "GRPC_PROXY".to_string(),
+                "socks5h://localhost:60081".to_string(),
+            ),
+            // Mixed-case input → BOTH canonical forms appended.
+            ("Http_Proxy".to_string(), "http://localhost:60080".to_string()),
+            // Names that merely contain or extend the suffix are not.
+            ("FOO_PROXYX".to_string(), "x".to_string()),
+            ("PATH".to_string(), r"C:\Windows".to_string()),
+        ];
+        add_proxy_case_twins(&mut entries);
+        let matching = |name: &str| {
+            entries
+                .iter()
+                .filter(|(k, _)| k == name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(matching("grpc_proxy").len(), 1);
+        assert_eq!(matching("grpc_proxy")[0].1, "socks5h://localhost:60081");
+        assert_eq!(matching("GRPC_PROXY").len(), 1);
+        // Mixed-case original is preserved AND both canonical forms added.
+        assert_eq!(matching("Http_Proxy").len(), 1);
+        assert_eq!(matching("HTTP_PROXY").len(), 1);
+        assert_eq!(matching("http_proxy").len(), 1);
+        assert_eq!(matching("http_proxy")[0].1, "http://localhost:60080");
+        // Non-matching names untouched, nothing appended for them.
+        assert_eq!(matching("FOO_PROXYX").len(), 1);
+        assert!(matching("foo_proxyx").is_empty());
+        assert_eq!(matching("PATH").len(), 1);
+        assert!(matching("path").is_empty());
     }
 }
